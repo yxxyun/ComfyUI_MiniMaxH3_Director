@@ -16,6 +16,7 @@ from ..lib.audio_io import (
     frames_to_audio_samples,
     load_reference_audio,
 )
+from .audio_postprocess import cleanup_merged_audio
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.audio_export")
 
@@ -66,6 +67,15 @@ def resolve_audio_mode(plan) -> str:
     if mode == AUDIO_MODE_SOURCE and task_key not in VIDEO_EDIT_AUDIO_TASKS:
         return AUDIO_MODE_GENERATE
     return mode
+
+
+def resolve_audio_level_match(plan) -> bool:
+    """Timeline ``output.audioLevelMatch``, default True (the fix is on by default)."""
+    out = (getattr(plan, "raw", None) or {}).get("output") or {}
+    value = out.get("audioLevelMatch", out.get("audio_level_match"))
+    if value is None:
+        return True
+    return bool(value)
 
 
 def _normalize_audio(audio: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -348,6 +358,15 @@ def _merge_generated_segment_audios(
         return empty_audio_dict(sr)
     parts = [_align_audio_channels(p, max_ch) for p in parts]
     merged = torch.cat(parts, dim=-1)
+    # Per-segment loudness differs and each segment carries its own low-frequency
+    # layer, so a raw concat steps audibly at every join. Match levels, drop the
+    # sub-bass and leave AAC headroom before the timeline is padded.
+    merged = cleanup_merged_audio(
+        merged,
+        sr,
+        [int(wave.shape[-1]) for wave in parts],
+        level_match=resolve_audio_level_match(plan),
+    )
     return _pad_or_trim_audio_to_frames(
         {"waveform": merged, "sample_rate": sr},
         frame_count=total_frames,
